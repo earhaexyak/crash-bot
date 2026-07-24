@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Crash Game</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  html,body{margin:0;padding:0;background:#05060c;height:100%;overflow:hidden;font-family:'Segoe UI',Tahoma,sans-serif;}
+  #stage{position:relative;width:100%;height:100vh;}
+  canvas{position:absolute;top:0;left:0;width:100%;height:100%;}
+  #hud{position:absolute;top:0;left:0;right:0;padding:16px;text-align:center;pointer-events:none;}
+  #multiplier{font-size:52px;font-weight:800;color:#fff;text-shadow:0 0 20px #7c5cff,0 0 40px #7c5cff;}
+  #status{font-size:14px;color:#9d8cff;margin-top:4px;}
+  #controls{position:absolute;bottom:0;left:0;right:0;padding:20px;display:flex;gap:10px;
+             background:linear-gradient(to top, rgba(5,6,12,0.95), transparent);}
+  input{flex:1;padding:14px;border-radius:12px;border:none;background:#181b2b;color:#fff;font-size:16px;box-sizing:border-box;}
+  button{padding:14px 20px;border:none;border-radius:12px;font-size:16px;font-weight:bold;color:#fff;}
+  #betBtn{background:linear-gradient(135deg,#7c5cff,#4d8dff);flex:1;}
+  #cashBtn{background:linear-gradient(135deg,#2fbf71,#1f9e5e);flex:1;display:none;}
+  #balance{position:absolute;top:16px;left:16px;color:#8dffb0;font-size:14px;pointer-events:none;}
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="bg"></canvas>
+  <canvas id="fx"></canvas>
+  <div id="balance">رصيد: -- Coin</div>
+  <div id="hud">
+    <div id="multiplier">1.00x</div>
+    <div id="status">اضغط ابدأ للدخول بجولة</div>
+  </div>
+  <div id="controls">
+    <input id="betInput" type="number" placeholder="المبلغ" value="100">
+    <button id="betBtn">🚀 ابدأ</button>
+    <button id="cashBtn">💸 اسحب</button>
+  </div>
+</div>
+
+<script>
+/*
+  Front-end only: pure presentation layer for a Telegram Mini App.
+  All money/points logic lives server-side in bot.py + db.py — this file
+  NEVER decides who wins. It only:
+    1) renders the animation,
+    2) sends the player's bet/cashout intent to the bot via Telegram.WebApp.sendData,
+    3) the bot's own server-side round (game_logic.py) is what actually resolves
+       the crash point and updates the balance.
+  Treat any multiplier/crash value shown here before server confirmation as
+  provisional UI only — never trust client-side numbers for payouts.
+*/
+
+const tg = window.Telegram?.WebApp;
+tg?.ready();
+tg?.expand();
+
+const bgCanvas = document.getElementById('bg');
+const fxCanvas = document.getElementById('fx');
+const bgCtx = bgCanvas.getContext('2d');
+const fxCtx = fxCanvas.getContext('2d');
+
+function resize(){
+  [bgCanvas, fxCanvas].forEach(c=>{
+    c.width = window.innerWidth * devicePixelRatio;
+    c.height = window.innerHeight * devicePixelRatio;
+  });
+}
+window.addEventListener('resize', resize);
+resize();
+
+// starfield background
+const stars = Array.from({length:120}, () => ({
+  x: Math.random()*window.innerWidth,
+  y: Math.random()*window.innerHeight,
+  r: Math.random()*1.5+0.3,
+  s: Math.random()*0.5+0.1
+}));
+
+function drawStars(){
+  bgCtx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  bgCtx.fillStyle = '#05060c';
+  bgCtx.fillRect(0,0,window.innerWidth,window.innerHeight);
+  stars.forEach(s=>{
+    s.y += s.s;
+    if(s.y > window.innerHeight){ s.y = 0; s.x = Math.random()*window.innerWidth; }
+    bgCtx.beginPath();
+    bgCtx.fillStyle = 'rgba(255,255,255,0.8)';
+    bgCtx.arc(s.x, s.y, s.r, 0, Math.PI*2);
+    bgCtx.fill();
+  });
+  requestAnimationFrame(drawStars);
+}
+drawStars();
+
+let running = false;
+let startTs = 0;
+let particles = [];
+const GROWTH_RATE = 0.00006; // must mirror game_logic.GROWTH_RATE server-side
+
+function currentMultiplier(){
+  const elapsedMs = performance.now() - startTs;
+  return Math.exp(GROWTH_RATE * elapsedMs * 1000);
+}
+
+function drawRocket(){
+  fxCtx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  fxCtx.clearRect(0,0,window.innerWidth,window.innerHeight);
+  if(!running) return;
+
+  const w = window.innerWidth, h = window.innerHeight;
+  const mult = currentMultiplier();
+  document.getElementById('multiplier').textContent = mult.toFixed(2)+'x';
+
+  // path: rocket rises along an easing curve toward top-right
+  const t = Math.min((mult-1)/6, 1);
+  const x = w*0.15 + t*w*0.6;
+  const y = h*0.75 - t*h*0.55;
+
+  particles.push({x, y, life:1});
+  particles = particles.filter(p=>p.life>0);
+  particles.forEach(p=>{
+    fxCtx.beginPath();
+    fxCtx.fillStyle = `rgba(124,92,255,${p.life*0.5})`;
+    fxCtx.arc(p.x, p.y, 6*p.life, 0, Math.PI*2);
+    fxCtx.fill();
+    p.life -= 0.03;
+  });
+
+  // glow trail curve
+  fxCtx.strokeStyle = 'rgba(124,92,255,0.6)';
+  fxCtx.lineWidth = 3;
+  fxCtx.beginPath();
+  fxCtx.moveTo(w*0.15, h*0.75);
+  fxCtx.quadraticCurveTo(w*0.15+ (x-w*0.15)/2, h*0.75, x, y);
+  fxCtx.stroke();
+
+  // rocket body
+  fxCtx.save();
+  fxCtx.translate(x, y);
+  fxCtx.rotate(-0.6);
+  fxCtx.font = '32px serif';
+  fxCtx.fillText('🚀', -16, 10);
+  fxCtx.restore();
+
+  requestAnimationFrame(drawRocket);
+}
+
+document.getElementById('betBtn').addEventListener('click', () => {
+  const amount = parseFloat(document.getElementById('betInput').value || '0');
+  if(!amount || amount <= 0) return;
+
+  running = true;
+  startTs = performance.now();
+  document.getElementById('betBtn').style.display = 'none';
+  document.getElementById('cashBtn').style.display = 'block';
+  document.getElementById('status').textContent = 'الجولة شغالة...';
+  drawRocket();
+
+  // Server is authoritative: this just signals intent. The bot replies
+  // with the real round state via a normal chat message (see bot.py /bet).
+  tg?.sendData(JSON.stringify({action:'bet', amount}));
+});
+
+document.getElementById('cashBtn').addEventListener('click', () => {
+  running = false;
+  document.getElementById('cashBtn').style.display = 'none';
+  document.getElementById('betBtn').style.display = 'block';
+  document.getElementById('status').textContent = 'اضغط ابدأ لجولة جديدة';
+
+  tg?.sendData(JSON.stringify({action:'cashout'}));
+});
+</script>
+</body>
+</html>
